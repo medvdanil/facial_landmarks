@@ -9,121 +9,137 @@ import sys
 from os import path
 
 input_shape = [None, img_input_shape[0], img_input_shape[1], 3]
-n_filters = [32, 64, 64, 128]
-filter_sizes = [3, 3, 3, 3]
 batch_size = 64
-dev = 0.003
-training_iters = 530000
+dev = 0.05
+training_iters = 600000
+dropout = 0.5
 
 conv_layers = [
-    [ [1, 3, 3, 32] ],
-    [ [2, 3, 3, 64] ],
-    [ [3, 3, 3, 64] ], 
-    [ [4, 3, 3, 128] ], 
+    [3, 3, 32, 3],
+    [3, 3, 64, 3],
+    [3, 3, 64, 2], 
+    #[3, 3, 64, 0], 
+    #[2, 2, 128, 0], 
 ]
-fc1_size = 256
+fc_sizes = []
 
-weight_decay = 0.004
-base_lr = 0.001
-stepsize = 5000
+weight_decay = 0.0005
+base_lr = 0.0001
+stepsize = 100000
 gamma = 0.8
+momentum = 0.9
 
-data_dump = 'data.npz'
+data_dump = 'data64.npz' #48_nojit.npz'
+model_file = './models/conv_net.ckpt'
 
-
-def max_pool(img, k):
-    return tf.nn.max_pool(img, ksize=[1, k, k, 1], strides=[1, k, k, 1], padding='SAME')
+def max_pool(img, k, stride):
+    return tf.nn.max_pool(img, ksize=[1, k, k, 1], strides=[1, stride, stride, 1], padding='VALID')
 
 
 def convolitions(data_in, conv_layers):
     print("shape_in =", data_in.get_shape().as_list())
     d_in = data_in.get_shape().as_list()[3:]
     d_in = 1 if len(d_in) == 0 else d_in[0]
-    for conv_block in conv_layers:
-        for j, (i, r, c, d_out) in enumerate(conv_block):
-            w = tf.get_variable("conv%d_%d_W" % (i, j + 1),
-                                shape=[r, c, d_in, d_out],
-                                initializer=tf.truncated_normal_initializer(stddev=dev),
-                                trainable=True)
-            b = tf.get_variable("conv%d_%d_b" % (i, j + 1),
-                                shape=[d_out],
-                                initializer=tf.constant_initializer(dev),
-                                trainable=True)
-            conv = tf.nn.conv2d(data_in, w, strides=[1, 1, 1, 1], padding='SAME')
-            conv = tf.nn.relu(tf.nn.bias_add(conv, b))
-            d_in = d_out
-            data_in = conv
-        data_in = max_pool(data_in, 2)    
-        print("mp shape =", data_in.get_shape().as_list())
-    return data_in
-
-
-def build_graph():    
-    x_ph = tf.placeholder(tf.uint8, input_shape, 'x')
-    y_ph = tf.placeholder(tf.float32, [None, n_landmarks, 2], 'y')
-    x_float = tf.cast(x_ph, tf.float32) / 255
     
-    phase_train = tf.placeholder(tf.bool, name='phase_train')
+    for i, (r, c, d_out, mp_k) in enumerate(conv_layers):
+        w = tf.get_variable("conv%d_W" % i, shape=[r, c, d_in, d_out],
+                            initializer=tf.truncated_normal_initializer(stddev=dev),
+                            trainable=True)
+        b = tf.get_variable("conv%d_b" % i, shape=[d_out],
+                            initializer=tf.constant_initializer(dev),
+                            trainable=True)
+        conv = tf.nn.conv2d(data_in, w, strides=[1, 1, 1, 1], padding='VALID')
+        conv = tf.nn.relu(tf.nn.bias_add(conv, b))
+        if i == 2:
+            conv2 = conv
+        d_in = d_out
+        print("conv shape =", conv.get_shape().as_list())
+        if mp_k > 0:
+            data_in = max_pool(conv, mp_k, 2)
+            print("mp shape =", data_in.get_shape().as_list())
+        else:
+            data_in = conv
+    return data_in, conv2
+
+
+def build_graph(n_landmarks=n_landmarks):    
+    x_ph = tf.placeholder(tf.float32, input_shape, 'x')
+    y_ph = tf.placeholder(tf.float32, [None, n_landmarks, 2], 'y')
+    conv2 = x_ph
     keep_prob = tf.placeholder(tf.float32, name='keep_prob')
 
-    conv = convolitions(x_float, conv_layers)
+    conv, conv2 = convolitions(x_ph, conv_layers)
     
+    dense = conv
+    data_size = np.prod(dense.get_shape().as_list()[1:])
+    dense = tf.reshape(dense, [-1, data_size])
+    # Fully connected layers
+    for i, fc_size in enumerate(fc_sizes):
+        data_size = np.prod(dense.get_shape().as_list()[1:])
+        w = tf.Variable(tf.truncated_normal([data_size, fc_size], stddev=dev),\
+                name="fc%d_W" % i)
+        b = tf.Variable(tf.constant(dev, shape=[fc_size]),\
+                name="fc%d_b" % i)
+        dense = tf.nn.relu(tf.add(tf.matmul(dense, w), b))
     
-    # Fully connected layer
-    data_size = np.prod(conv.get_shape().as_list()[1:])
-    w = tf.Variable(tf.truncated_normal([data_size, fc1_size], stddev=dev),\
-            name="fc1_W")
-    b = tf.Variable(tf.constant(dev, shape=[fc1_size]),\
-            name="fc1_b")
-    dense1 = tf.reshape(conv, [-1, data_size])
-    dense1 = tf.nn.relu(tf.add(tf.matmul(dense1, w), b))
+    dense = tf.nn.dropout(dense, keep_prob)
     
-    
-    w = tf.Variable(tf.truncated_normal([dense1.get_shape().as_list()[1], 2 * n_landmarks], \
-        stddev=dev), name="fc2_W")
-    b = tf.Variable(tf.constant(dev, shape=[2 * n_landmarks]), name="fc2_b")
-    dense2 = tf.nn.relu(tf.add(tf.matmul(dense1, w), b))
-    dense2 = tf.nn.dropout(dense2, keep_prob)
+    w = tf.Variable(tf.truncated_normal([dense.get_shape().as_list()[1], 2 * n_landmarks], \
+        stddev=dev), name="fc_final_W")
+    b = tf.Variable(tf.constant(dev, shape=[2 * n_landmarks]), name="fc_final_b")
+    dense2 = tf.nn.relu(tf.add(tf.matmul(dense, w), b))
+    #dense2 = tf.nn.dropout(dense2, keep_prob)
     
     prediction = tf.reshape(dense2, (-1, n_landmarks, 2))
 
     l2_loss = tf.add_n([tf.nn.l2_loss(v) for v in tf.trainable_variables()])
-    regularizers = weight_decay * l2_loss
     # l2 loss
-    loss_x = tf.reduce_sum(tf.squared_difference(prediction, y_ph), [1, 2])
-    cost = tf.reduce_mean(loss_x) + regularizers
+    cost = tf.reduce_mean(tf.squared_difference(prediction, y_ph)) +  weight_decay * l2_loss
 
     return {'cost': cost, 'x': x_ph, 'y': y_ph, 'pred': prediction,
-            'keep_prob': keep_prob,
-            'train': phase_train}
+            'keep_prob': keep_prob, 'conv2':conv2}
 
 
 def train():
     try:
         data = np.load(data_dump)
-        train_x, train_y = data['train_x'], data['train_y']
     except (KeyError, FileNotFoundError):
         data = None
     if data is None:
-        train_x, train_y, train_names = load_data(sys.argv[1])
-        np.savez(data_dump, train_x=train_x, train_y=train_y, 
-                 train_names=train_names)
+        train_data = load_data(sys.argv[1], is_train=True)
+        test_data = load_data(sys.argv[1], is_train=False)
+        data = {**train_data, **test_data}
+        np.savez(data_dump, **data)
+    train_x, train_y = data['train_x'], data['train_y']
+    test_x, test_y = data['test_x'], data['test_y']
+    train_wh = data['train_wh']
+    test_wh = data['test_wh']
+    dlib_err = data['dlib_err']
+    #draw_CED(dlib_err)
+    
     print('train_x', train_x.shape, train_x.dtype)
+    print(len(train_wh), len(train_y))
     #for i in range(100):
-    #    batch_show(train_x[i*64:i*64+64])
+    #    landmarks_batch_show(train_x[i*batch_size:i*batch_size+batch_size], train_y[i*batch_size:i*batch_size+batch_size])
+    #    batch_show(train_x[i*batch_size:i*batch_size+batch_size])
+     
     # y normalization
     train_y[..., 0] /= img_input_shape[1]
     train_y[..., 1] /= img_input_shape[0]
-    train_y = train_y * 2 - 1
+    test_y[..., 0] /= img_input_shape[1]
+    test_y[..., 1] /= img_input_shape[0]
+    #train_y = train_y[:,[41, 46, 30, 57, 19, 24],:]
+    #test_y = test_y[:,[41, 46, 30, 57, 19, 24],:]
     
     bg = BatchGenerator(train_x, train_y)
     
-    with tf.device("/gpu:0"):
-        conv_net = build_graph()
-        batch = tf.Variable(0, dtype=tf.int32)
-        learning_rate = tf.train.exponential_decay(base_lr, batch * batch_size, stepsize, gamma, staircase=True)
-        optimizer = tf.train.AdamOptimizer(
-            learning_rate).minimize(conv_net['cost'], global_step=batch)
+    #with tf.device("/gpu:0"):
+    conv_net = build_graph()
+    batch = tf.Variable(0, dtype=tf.int32)
+    learning_rate = tf.train.exponential_decay(base_lr, batch * batch_size, stepsize, gamma, staircase=True)
+    optimizer = tf.train.AdamOptimizer(
+        learning_rate).minimize(conv_net['cost'], global_step=batch)
+    #optimizer = tf.train.MomentumOptimizer(learning_rate, momentum).minimize(conv_net['cost'], global_step=batch)
     save_step = 10000
     saver = tf.train.Saver()
      
@@ -143,19 +159,54 @@ def train():
         while batch_i * batch_size < training_iters:
             batch_xs, batch_label = bg.next_batch(batch_size)
 
-            train_cost, pred = sess.run([conv_net['cost'], conv_net['pred'], optimizer], feed_dict={
-                conv_net['x']: batch_xs, conv_net['y']: batch_label, conv_net['train']: True,
-                conv_net['keep_prob']: 0.5})[:2]
+            sess.run(optimizer, feed_dict={conv_net['x']: batch_xs, conv_net['y']: batch_label, 
+                                           conv_net['keep_prob']: dropout})
             if batch_i % 40 == 0:
-                print("Iter %d: loss=%.3f" % (batch_i * batch_size, train_cost))
+                train_loss, pred = sess.run([conv_net['cost'], conv_net['pred']], feed_dict={
+                    conv_net['x']: train_x[:batch_size], conv_net['y']: train_y[:batch_size],
+                    conv_net['keep_prob']: 1.0})
+                
+                print("Iter %d: loss=%.6f" % (batch_i * batch_size, train_loss))
                 print("batch %d, lr %.5f" % tuple(sess.run([batch, learning_rate])))
-                #for line in np.hstack((pred[3], batch_label[3], (pred[3] - batch_label[3]) ** 2)):
-                #    print(", ".join(map(lambda x: "%.3f" % x, line))) 
-            if batch_i % save_step == 0:
-                # Save the variables to disk.
-                saver.save(sess, "./models/" + 'conv_net.ckpt',
-                           global_step=batch_i,
-                           write_meta_graph=False)
+            if (batch_i + 1) % 200 == 0:
+                err_arr = np.zeros(0)
+                for i in range((len(test_x) + batch_size - 1) // batch_size):
+                    loss, pred, conv2 = sess.run([conv_net['cost'], conv_net['pred'], conv_net['conv2']], feed_dict={
+                        conv_net['x']: test_x[i * batch_size:(i + 1) * batch_size], 
+                        conv_net['y']: test_y[i * batch_size:(i + 1) * batch_size],
+                        conv_net['keep_prob']: 1.0})
+                    err = ((pred - test_y[i * batch_size:(i + 1) * batch_size]) * \
+                        test_wh[i * batch_size:(i + 1) * batch_size, None,:]) ** 2
+                    err = np.mean(np.sqrt(np.sum(err, axis=2)), axis=1)
+                    err /= np.sqrt(np.prod(test_wh[i * batch_size:(i + 1) * batch_size], axis=1))
+                    #landmarks_batch_show(test_x[i * batch_size:(i + 1) * batch_size], pred * img_input_shape[0])
+                    err_arr = np.concatenate((err_arr, err))
+                    #if i == 0:
+                    #    for line in np.hstack((pred[3], test_y[3], (pred[3] - test_y[3]) ** 2)):
+                    #        print(", ".join(map(lambda x: "%.3f" % x, line)))
+                #w1 = sess.run(tf.get_collection(tf.GraphKeys.GLOBAL_VARIABLES, scope="conv%d_b" % 1)[0])
+                #print(w1)
+                err_arr.dump('err_arr.dump')
+                
+                if (batch_i + 1) % 400 == 0:
+                    conv2 = np.transpose(conv2, [0, 3, 1, 2])
+                    #conv2 = np.reshape(conv2, (-1,) + conv2.shape[2:])
+                    toshow = conv2[:64]
+                    toshow = np.stack([conv2, conv2, conv2], axis=-1)
+                    print(toshow.min(), toshow.max())
+                    toshow/=toshow.max()
+                    for i in range(5):
+                        print(np.mean((toshow[i] - toshow[0]) ** 2), np.mean((pred[i] - pred[0]) ** 2), 
+                            np.mean((test_y[i] - test_y[0]) ** 2))
+                        batch_show(toshow[i])
+                        
+                #if (batch_i + 1) % 2000 == 0:
+                #    draw_CED(err_arr, dlib_err)
+                        
+                print("test loss = %.6f, norm err = %.6f" % (loss, err_arr.mean()))
+                print("model_saved to " + \
+                      saver.save(sess, model_file))
+                    
             batch_i += 1
         
         coord.request_stop()
@@ -165,5 +216,9 @@ if __name__ == '__main__':
     train()
 
 
+
+#train 0.07547 64x64
+#test 0.071184
+#test 0.072645 48
 
 
