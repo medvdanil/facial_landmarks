@@ -1,22 +1,28 @@
 from train import *
-from os import listdir
+from os import listdir, path
 
 samples_dir = './samples/'
+data_test_dump = 'data_test.npz'
 
 def test():
     conv_net = build_graph()
     saver = tf.train.Saver()
 
     detector = get_frontal_face_detector()
-    data = np.load(data_dump)
-    
-    test_x, test_y = data['test_x'], data['test_y']
-    test_y[..., 0] /= img_input_shape[1]
-    test_y[..., 1] /= img_input_shape[0]
-    test_wh = data['test_wh']
-    dlib_err = data['dlib_err']
-    names = data['test_names']
-    msk300w = np.array([True if '300W' in n else False for n in names], dtype=np.bool)
+    data_f = None
+    if path.isfile(data_dump):
+        data_f = data_dump
+    elif path.isfile(data_test_dump):
+        data_f = data_test_dump
+    if data_f is not None:
+        data = np.load(data_f)    
+        test_x, test_y = data['test_x'], data['test_y']
+        test_y[..., 0] /= img_input_shape[1]
+        test_y[..., 1] /= img_input_shape[0]
+        test_wh = data['test_wh']
+        dlib_err = data['dlib_err']
+        names = data['test_names']
+        msk300w = np.array([True if '300W' in n else False for n in names], dtype=np.bool)
     
     
     
@@ -25,18 +31,19 @@ def test():
         saver.restore(sess, './models/conv_net.ckpt')
         print("Model restored.")
         
-        loss, err_arr = calc_score(sess, conv_net, test_x, test_y, test_wh)
-        loss, err_300w = calc_score(sess, conv_net, test_x[msk300w], 
-                                    test_y[msk300w], test_wh[msk300w])
-        loss, err_menpo = calc_score(sess, conv_net, test_x[~msk300w], 
-                                     test_y[~msk300w], test_wh[~msk300w])
-        print('err 300W: %.6f' % np.mean(err_300w))
-        print('err menpo: %.6f' % np.mean(err_menpo))
-        areas = draw_CED(err_arr, err_300w, err_menpo, dlib_err,
-                         labels=['300W+Menpo', '300W', 'Menpo', 'DLIB'])
-        ar_norm = areas / 0.08
-        print(areas)
-        print(ar_norm)
+        if data_f is not None:
+            loss, err_arr = calc_score(sess, conv_net, test_x, test_y, test_wh)
+            loss, err_300w = calc_score(sess, conv_net, test_x[msk300w], 
+                                        test_y[msk300w], test_wh[msk300w])
+            loss, err_menpo = calc_score(sess, conv_net, test_x[~msk300w], 
+                                        test_y[~msk300w], test_wh[~msk300w])
+            print('err 300W: %.6f' % np.mean(err_300w))
+            print('err menpo: %.6f' % np.mean(err_menpo))
+            areas = draw_CED(err_arr, err_300w, err_menpo, dlib_err,
+                            labels=['300W+Menpo', '300W', 'Menpo', 'DLIB'])
+            ar_norm = areas / 0.08
+            print(areas)
+            print(ar_norm)
         
         for img_file in listdir(samples_dir):
             try:
