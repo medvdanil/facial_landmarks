@@ -241,6 +241,9 @@ def train():
 
 if __name__ == '__main__':
     train()
+    from test import test
+    tf.reset_default_graph()
+    test()
 
 
 
