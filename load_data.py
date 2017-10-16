@@ -9,7 +9,6 @@ from skimage.transform import AffineTransform, warp
 from glob import iglob
 from dlib import get_frontal_face_detector, shape_predictor
 from matplotlib import pyplot as plt
-import joblib
 
 n_landmarks = 68
 img_input_shape = 64, 64
@@ -217,7 +216,7 @@ def load_data(data_dir, is_train=True):
             dlib_err.append(err)
             print("err = %.5f" % err)
             
-    joblib.dump((x, y, wh, names), "tmp2.dump", compress=9)
+    #joblib.dump((x, y, wh, names), "tmp2.dump", compress=9)
     s = 'train' if is_train else 'test'
     data = {s + '_x': np.stack(x), s + '_y': np.stack(y), 
             s + '_wh': np.array(wh), s + '_names': np.array(names)}

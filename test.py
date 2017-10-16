@@ -22,7 +22,7 @@ def test():
     
     with tf.Session() as sess:
         # Restore variables from disk.
-        saver.restore(sess, './models0.035/conv_net.ckpt')
+        saver.restore(sess, './models/conv_net.ckpt')
         print("Model restored.")
         
         loss, err_arr = calc_score(sess, conv_net, test_x, test_y, test_wh)
