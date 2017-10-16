@@ -18,18 +18,17 @@ conv_layers = [
     [3, 3, 32, 3],
     [3, 3, 64, 3],
     [3, 3, 64, 2], 
-    #[3, 3, 64, 0], 
-    #[2, 2, 128, 0], 
+    [2, 2, 128, 0], 
 ]
-fc_sizes = []
+fc_sizes = [256, 512]
 
-weight_decay = 0.0005
-base_lr = 0.0001
-stepsize = 100000
+weight_decay = 0.0001
+base_lr = 0.001
+stepsize = 30000
 gamma = 0.8
 momentum = 0.9
 
-data_dump = 'data64.npz' #48_nojit.npz'
+data_dump = 'data.npz' #48_nojit.npz'
 model_file = './models/conv_net.ckpt'
 
 def max_pool(img, k, stride):
@@ -53,12 +52,15 @@ def convolitions(data_in, conv_layers):
         if i == 2:
             conv2 = conv
         d_in = d_out
-        print("conv shape =", conv.get_shape().as_list())
+        print("conv shape =", conv.get_shape().as_list(), conv.dtype)
         if mp_k > 0:
             data_in = max_pool(conv, mp_k, 2)
             print("mp shape =", data_in.get_shape().as_list())
         else:
             data_in = conv
+        
+    #return tf.concat([tf.reshape(data_in, [-1, np.prod(data_in.get_shape().as_list()[1:])]), 
+    #                  tf.reshape(conv2, [-1, np.prod(conv2.get_shape().as_list()[1:])])], 1), conv2
     return data_in, conv2
 
 
@@ -81,9 +83,14 @@ def build_graph(n_landmarks=n_landmarks):
         b = tf.Variable(tf.constant(dev, shape=[fc_size]),\
                 name="fc%d_b" % i)
         dense = tf.nn.relu(tf.add(tf.matmul(dense, w), b))
+
+        dense = tf.concat([tf.reshape(dense, [-1, np.prod(dense.get_shape().as_list()[1:])]), 
+                           tf.reshape(conv2, [-1, np.prod(conv2.get_shape().as_list()[1:])])], 1)
     
     dense = tf.nn.dropout(dense, keep_prob)
     
+    #dense = tf.concat([tf.reshape(dense, [-1, np.prod(dense.get_shape().as_list()[1:])]), 
+    #                  tf.reshape(conv2, [-1, np.prod(conv2.get_shape().as_list()[1:])])], 1)
     w = tf.Variable(tf.truncated_normal([dense.get_shape().as_list()[1], 2 * n_landmarks], \
         stddev=dev), name="fc_final_W")
     b = tf.Variable(tf.constant(dev, shape=[2 * n_landmarks]), name="fc_final_b")
@@ -98,6 +105,32 @@ def build_graph(n_landmarks=n_landmarks):
 
     return {'cost': cost, 'x': x_ph, 'y': y_ph, 'pred': prediction,
             'keep_prob': keep_prob, 'conv2':conv2}
+
+def calc_score(sess, conv_net, test_x, test_y, test_wh, interocular=False):
+    err_arr = np.zeros(0)
+    loss_sum = 0.0
+    for i in range((len(test_x) + batch_size - 1) // batch_size):
+        loss, pred, conv2 = sess.run([conv_net['cost'], conv_net['pred'], conv_net['conv2']], feed_dict={
+            conv_net['x']: test_x[i * batch_size:(i + 1) * batch_size], 
+            conv_net['y']: test_y[i * batch_size:(i + 1) * batch_size],
+            conv_net['keep_prob']: 1.0})
+        if interocular:
+            print(test_y.shape)
+            err = np.sum((pred - test_y[i * batch_size:(i + 1) * batch_size]) ** 2, axis=2)
+            idist = (test_y[i * batch_size:(i + 1) * batch_size, 44] - \
+                     test_y[i * batch_size:(i + 1) * batch_size, 37]) ** 2
+            print(idist.shape)
+            err /= np.sum(idist, axis=1)[:, None]
+            err = np.mean(np.sqrt(err), axis=1)
+        else:
+            err = ((pred - test_y[i * batch_size:(i + 1) * batch_size]) * \
+                test_wh[i * batch_size:(i + 1) * batch_size, None,:]) ** 2
+            err = np.mean(np.sqrt(np.sum(err, axis=2)), axis=1)
+            err /= np.sqrt(np.prod(test_wh[i * batch_size:(i + 1) * batch_size], axis=1))
+        #landmarks_batch_show(test_x[i * batch_size:(i + 1) * batch_size], pred * img_input_shape[0])
+        err_arr = np.concatenate((err_arr, err))
+        loss_sum += loss * len(pred)
+    return loss_sum / len(test_x), err_arr
 
 
 def train():
@@ -153,61 +186,56 @@ def train():
 
         # Start up the queues for handling the image pipeline
         threads = tf.train.start_queue_runners(sess=sess, coord=coord)
-
+        
+        loss_plot = []
         batch_i = 0
+        try:
+            while batch_i * batch_size < training_iters:
+                batch_xs, batch_label = bg.next_batch(batch_size)
 
-        while batch_i * batch_size < training_iters:
-            batch_xs, batch_label = bg.next_batch(batch_size)
-
-            sess.run(optimizer, feed_dict={conv_net['x']: batch_xs, conv_net['y']: batch_label, 
-                                           conv_net['keep_prob']: dropout})
-            if batch_i % 40 == 0:
-                train_loss, pred = sess.run([conv_net['cost'], conv_net['pred']], feed_dict={
-                    conv_net['x']: train_x[:batch_size], conv_net['y']: train_y[:batch_size],
-                    conv_net['keep_prob']: 1.0})
-                
-                print("Iter %d: loss=%.6f" % (batch_i * batch_size, train_loss))
-                print("batch %d, lr %.5f" % tuple(sess.run([batch, learning_rate])))
-            if (batch_i + 1) % 200 == 0:
-                err_arr = np.zeros(0)
-                for i in range((len(test_x) + batch_size - 1) // batch_size):
-                    loss, pred, conv2 = sess.run([conv_net['cost'], conv_net['pred'], conv_net['conv2']], feed_dict={
-                        conv_net['x']: test_x[i * batch_size:(i + 1) * batch_size], 
-                        conv_net['y']: test_y[i * batch_size:(i + 1) * batch_size],
+                sess.run(optimizer, feed_dict={conv_net['x']: batch_xs, conv_net['y']: batch_label, 
+                                            conv_net['keep_prob']: dropout})
+                if batch_i % 40 == 0:
+                    train_loss, pred, conv2 = sess.run([conv_net['cost'], conv_net['pred'], conv_net['conv2']], feed_dict={
+                        conv_net['x']: train_x[:batch_size], conv_net['y']: train_y[:batch_size],
                         conv_net['keep_prob']: 1.0})
-                    err = ((pred - test_y[i * batch_size:(i + 1) * batch_size]) * \
-                        test_wh[i * batch_size:(i + 1) * batch_size, None,:]) ** 2
-                    err = np.mean(np.sqrt(np.sum(err, axis=2)), axis=1)
-                    err /= np.sqrt(np.prod(test_wh[i * batch_size:(i + 1) * batch_size], axis=1))
-                    #landmarks_batch_show(test_x[i * batch_size:(i + 1) * batch_size], pred * img_input_shape[0])
-                    err_arr = np.concatenate((err_arr, err))
+                    
+                    print("Iter %d: loss=%.6f" % (batch_i * batch_size, train_loss))
+                    print("batch %d, lr %.5f" % tuple(sess.run([batch, learning_rate])))
+                    
+                if (batch_i + 1) % 200 == 0:
+                    loss, err_arr = calc_score(sess, conv_net, test_x, test_y, test_wh)
                     #if i == 0:
                     #    for line in np.hstack((pred[3], test_y[3], (pred[3] - test_y[3]) ** 2)):
                     #        print(", ".join(map(lambda x: "%.3f" % x, line)))
-                #w1 = sess.run(tf.get_collection(tf.GraphKeys.GLOBAL_VARIABLES, scope="conv%d_b" % 1)[0])
-                #print(w1)
-                err_arr.dump('err_arr.dump')
-                
-                if (batch_i + 1) % 400 == 0:
-                    conv2 = np.transpose(conv2, [0, 3, 1, 2])
-                    #conv2 = np.reshape(conv2, (-1,) + conv2.shape[2:])
-                    toshow = conv2[:64]
-                    toshow = np.stack([conv2, conv2, conv2], axis=-1)
-                    print(toshow.min(), toshow.max())
-                    toshow/=toshow.max()
-                    for i in range(5):
-                        print(np.mean((toshow[i] - toshow[0]) ** 2), np.mean((pred[i] - pred[0]) ** 2), 
-                            np.mean((test_y[i] - test_y[0]) ** 2))
-                        batch_show(toshow[i])
-                        
-                #if (batch_i + 1) % 2000 == 0:
-                #    draw_CED(err_arr, dlib_err)
-                        
-                print("test loss = %.6f, norm err = %.6f" % (loss, err_arr.mean()))
-                print("model_saved to " + \
-                      saver.save(sess, model_file))
-                    
-            batch_i += 1
+                    #w1 = sess.run(tf.get_collection(tf.GraphKeys.GLOBAL_VARIABLES, scope="conv%d_b" % 1)[0])
+                    #print(w1)
+                    err_arr.dump('err_arr.dump')
+                    loss_plot.append([batch_i * batch_size, loss])
+                    if (batch_i + 1) % 400 == 0:
+                        conv2 = np.transpose(conv2, [0, 3, 1, 2])
+                        #conv2 = np.reshape(conv2, (-1,) + conv2.shape[2:])
+                        toshow = conv2[:64]
+                        toshow = np.stack([conv2, conv2, conv2], axis=-1)
+                        print(toshow.min(), toshow.max())
+                        toshow/=toshow.max()
+                        for i in range(5):
+                            print(np.mean((toshow[i] - toshow[0]) ** 2), np.mean((pred[i] - pred[0]) ** 2), 
+                                np.mean((test_y[i] - test_y[0]) ** 2))
+                            #batch_show(toshow[i])
+                            
+                    #if (batch_i + 1) % 2000 == 0:
+                    #    draw_CED(err_arr, dlib_err)
+                            
+                    print("test loss = %.6f, norm err = %.6f" % (loss, err_arr.mean()))
+                    print("model_saved to " + \
+                        saver.save(sess, model_file))
+                batch_i += 1
+        except KeyboardInterrupt:
+            pass
+        loss_plot = np.array(loss_plot)
+        plt.plot(loss_plot[:,0], loss_plot[:,1])
+        plt.show()
         
         coord.request_stop()
         coord.join(threads)

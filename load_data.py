@@ -226,12 +226,28 @@ def load_data(data_dir, is_train=True):
     return data
 
 
-def draw_CED(*args, err_max=0.08):
-    for err_arr in args:
-        x = np.zeros(len(err_arr) + 1)
-        y = np.zeros(len(err_arr) + 1)
-        x[1:] = np.sort(err_arr)
-        y[1:] = np.arange(len(err_arr)) / len(err_arr)
-        trh_i = np.searchsorted(x, err_max)
-        plt.plot(x[:trh_i], y[:trh_i]) 
+def area_under_CED(x, y):
+    return np.sum((x[1:] - x[:-1]) * y[1:])
+    
+
+def draw_CED(*args, err_max=0.08, labels=None):
+    if labels is None:
+        labels = ['%d' % i for i in range(len(args))]
+        if len(args) == 1:
+            labels = [None]
+    areas = []
+    for i, err_arr in enumerate(args):
+        x = np.zeros(len(err_arr) + 2)
+        y = np.ones(len(err_arr) + 2)
+        y[0] = 0.0
+        x[1:-1] = np.sort(err_arr)
+        y[1:-1] = np.arange(len(err_arr)) / len(err_arr)
+        trh_i = np.searchsorted(x[:-1], err_max)
+        x[trh_i] = err_max
+        x = x[:trh_i+1]
+        y = y[:trh_i+1]
+        areas.append(area_under_CED(x, y))
+        plt.plot(x, y, label=labels[i]) 
+    plt.legend()
     plt.show()
+    return np.array(areas)
